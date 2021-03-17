@@ -8,6 +8,13 @@ const PIN_INPUT_SELECTOR = '#input__email_verification_pin';
 const PIN_SUBMIT_SELECTOR = '#email-pin-submit-button';
 const ACCEPT_COOKIES_SELECTOR = '[data-tracking-control-name="ga-cookie.consent.accept.v3"]';
 const RE_ACCEPT_COOKIES_SELECTOR = '[data-test-global-alert-action="1"]';
+const SEND_CONNECT_BTN_DETECT_SELECTOR = '.artdeco-button.artdeco-button--2.artdeco-button--secondary.ember-view';
+const SEND_INVITE_BTN_SELECTOR = '[aria-label="Send now"]';
+const MEMBER_CONTAINER_LIST_SELECTOR = '.entity-result__item';
+const MEMBER_BTN_SELECTOR = '.entity-result__item .artdeco-button__text';
+const MEMBER_LINK_SELECTOR = '.entity-result__image .app-aware-link';
+const MEMBER_NAME_SELECTOR = '.entity-result__content span[aria-hidden="true"]';
+
 
 const CONTINUE_BTN_SELECTOR = "#checkpointSubmitButton-actual-button";
 const CODE_TO_EMAIL_SELECTOR = 'input[name="verification_method"][value="37"]';
@@ -16,6 +23,7 @@ const CPTCHA_RES_SELECTOR = 'input[name="captcha_response"]';
 const TWOFA_INPUT_SELECTOR = 'input[name="approvals_code"]';
 const HAVE_TROUBLE_SELECTOR = "._dd6";
 const SEND_LOGIN_CODE_SELECTOR = 'input[name="help_selected"][value="sms_requested"]'
+
 
 const LOGIN_ONE_TAP_SELECTOR = '._2pis';
 const ACCEPT_ALL_SELECTOR = '[data-testid="cookie-policy-dialog-accept-button"]';
@@ -59,6 +67,29 @@ const delay = (ms) => {
     })
 }
 
+async function getCookies() {
+
+    await delay(2000);
+    await page.screenshot({ path: 'linkedin.png' });
+    var data = await page._client.send('Network.getAllCookies');
+
+    if (data.cookies) {
+        for (let i = 0; i < data.cookies.length; i++) {
+            let item = data.cookies[i];
+            let cookieName = item.name;
+            let cookieValue = item.value;
+            cookies[cookieName] = cookieValue
+        }
+    }
+    console.log("cookies done")
+
+    if (await page.$(RE_ACCEPT_COOKIES_SELECTOR) !== null) {
+        const accept_elm = await page.$(RE_ACCEPT_COOKIES_SELECTOR);
+        await accept_elm.click({ clickCount: 1 });
+    }
+
+}
+
 async function playTest(url, res) {
 
     try {
@@ -95,21 +126,60 @@ async function handleIpProcess(ip_email, ip_code) {
     await getCookies();
 }
 
-async function getCookies() {
+async function handleProcess1(term, count, res) {
 
-    await delay(10000);
-    await page.screenshot({ path: 'linkedin.png' });
-    var data = await page._client.send('Network.getAllCookies');
+    await playTest("https://www.linkedin.com/login", res);
+    let search_url = "https://www.linkedin.com/search/results/people/?geoUrn=%5B%22103644278%22%5D&keywords=" + term + "&origin=FACETED_SEARCH";
 
-    if (data.cookies) {
-        for (let i = 0; i < data.cookies.length; i++) {
-            let item = data.cookies[i];
-            let cookieName = item.name;
-            let cookieValue = item.value;
-            cookies[cookieName] = cookieValue
+    if (!warnFlag) {
+
+        await page.goto(search_url);
+        if (await page.$(SEND_CONNECT_BTN_DETECT_SELECTOR) !== null) {
+
+            const memberContainers = await page.$$(MEMBER_CONTAINER_LIST_SELECTOR);
+            let profileArr = [];
+            let connectCnt = 0;
+            for (let i = 0; i < 6; i++) {
+
+                let memberContainer = memberContainers[i];
+                let memberLinkVal = await memberContainer.$eval(MEMBER_LINK_SELECTOR, i => i.getAttribute('href'));
+                let memberBtnVal = await memberContainer.$eval(MEMBER_BTN_SELECTOR, i => i.innerHTML);
+                let memberSpanVal = await memberContainer.$eval(MEMBER_NAME_SELECTOR, i => i.innerHTML)
+                memberBtnVal = memberBtnVal.replace(/\s/g, '');
+                memberSpanVal = memberSpanVal.replace('<!---->', '');
+                memberSpanVal = memberSpanVal.replace('<!---->', '');
+
+                if (memberBtnVal === 'Connect') {
+                    connectCnt++;
+                    let profileItem = {};
+                    profileItem["name"] = memberSpanVal;
+                    profileItem["URL"] = memberLinkVal;
+                    profileArr.push(profileItem);
+                }
+                if (connectCnt === count) break;
+            }
+
+            console.log("ProfileArray: ", profileArr);
+
+            const sendConnectElms = await page.$x("//button[contains(., 'Connect')]");
+            if (sendConnectElms.length > 0) {
+
+                for (let i = 1; i <= count; i++) {
+
+                    let sendConnectElm = sendConnectElms[i];
+                    await sendConnectElm.click();
+                    await delay(3000);
+
+                    const inviteBtn_elm = await page.$(SEND_INVITE_BTN_SELECTOR);
+                    await inviteBtn_elm.click({ clickCount: 1 });
+                    await delay(3000);
+                    console.log("invite sent!");
+                }
+            }
+
+            return res.status(200).json({ status: 'success', info: profileArr }).end();
         }
     }
-    console.log("cookies", cookies)
 }
 
 const playing = async (res) => {
@@ -136,8 +206,17 @@ const playing = async (res) => {
     console.log(new Date().toLocaleString() + ': ', 'logging in ...');
 
     try {
-        await page.waitForNavigation({ timeout: 15000 });
-        loginFailedFlag = false;
+        await page.waitForNavigation();
+        let pageURL = page.url();
+        if (pageURL === 'https://www.linkedin.com/feed/') {
+            loginFailedFlag = false;
+            console.log("Login success");
+        } else if (pageURL === 'https://www.linkedin.com/checkpoint/lg/login-submit') {
+            throw new Error('Login fail!');
+        } else {
+            loginFailedFlag = false;
+            console.log("Pin code is required");
+        }
 
     } catch (error) {
         console.log("Login failed");
@@ -182,7 +261,7 @@ app.set('view engine', 'swig');
 app.set('views', path.join(__dirname, 'views'));
 app.use(express.static(__dirname + '/public'));
 
-app.get('/', async (req, res) => {
+app.get('/first-login', async (req, res) => {
 
     cookies = {};
     if (req.query && req.query.email && req.query.password) {
@@ -219,18 +298,22 @@ app.get('/ip', async (req, res) => {
     }
 });
 
-app.get('/twofa', async (req, res) => {
+app.get('/normal-connections', async (req, res) => {
 
-    if (req.query && req.query.email && req.query.code) {
+    if (req.query && req.query.email && req.query.password && req.query.term && req.query.count) {
 
-        let twofa_email = req.query.email;
-        let twofa_code = req.query.code;
-        await handleTwofaProcess(twofa_email, twofa_code);
-        return res.status(200).json({ status: 'success', info: cookies }).end();
+        email = req.query.email;
+        password = req.query.password;
+        let term = req.query.term;
+        let count = req.query.count;
+        await handleProcess1(term, count, res);
 
     } else {
+        return res.status(400).json({ status: 'failure', info: 'No Information Set' }).end();
+    }
 
-        return res.status(400).json({ status: 'failure', info: 'Awaiting 2FA Code' }).end();
+    if (!loginFailedFlag && warnFlag) {
+        return res.status(200).json({ status: 'success', info: warnmsg }).end();
     }
 });
 
